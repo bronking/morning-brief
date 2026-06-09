@@ -41,20 +41,18 @@ Return ONLY valid JSON, no markdown, no explanation. Schema:
 
 Focus ONLY on events with real potential to move EU indexes today. Include: ECB/Fed speakers, CPI/PPI/PMI/GDP/NFP releases, major earnings if market-moving, geopolitical or macro tail risks. Omit noise. Events list: 3-7 items max."""
 
-    api_key = os.environ["OPENROUTER_API_KEY"]
-    url = "https://openrouter.ai/api/v1/chat/completions"
+    token = os.environ["GITHUB_TOKEN"]
+    url = "https://models.inference.ai.azure.com/chat/completions"
 
     payload = json.dumps({
-        "model": "meta-llama/llama-3.3-70b-instruct:free",
+        "model": "gpt-4o-mini",
         "messages": [{"role": "user", "content": prompt}],
         "temperature": 0.3
     }).encode("utf-8")
 
     req = urllib.request.Request(url, data=payload, headers={
         "Content-Type": "application/json",
-        "Authorization": f"Bearer {api_key}",
-        "HTTP-Referer": "https://github.com",
-        "X-Title": "Morning Brief"
+        "Authorization": f"Bearer {token}"
     })
 
     with urllib.request.urlopen(req) as resp:
