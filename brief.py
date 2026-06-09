@@ -1,109 +1,121 @@
 import os
 import json
 import urllib.request
-import urllib.error
 import sendgrid
 from sendgrid.helpers.mail import Mail
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, time as dtime
 import pytz
+import yfinance as yf
+import pandas as pd
 
 CET = pytz.timezone("Europe/Amsterdam")
-ET = pytz.timezone("America/New_York")
+ET  = pytz.timezone("America/New_York")
 UTC = pytz.utc
 
-def polygon_aggs(ticker, from_date, to_date, multiplier=1, timespan="minute"):
-    key = os.environ["POLYGON_API_KEY"]
-    url = f"https://api.polygon.io/v2/aggs/ticker/{ticker}/range/{multiplier}/{timespan}/{from_date}/{to_date}?adjusted=true&sort=asc&limit=50000&apiKey={key}"
+# Ticker map: label -> (yf_ticker, name, group, tz, decimals)
+CONTRACTS = {
+    "FDAX":   ("FDAX=F",  "DAX futures",       "EU",    "CET", 0),
+    "Bund":   ("FGBL=F",  "Euro bond futures",  "EU",    "CET", 2),
+    "FTSE":   ("Z=F",     "FTSE 100 futures",   "EU",    "CET", 0),
+    "ES":     ("ES=F",    "S&P 500 futures",    "US",    "ET",  2),
+    "NQ":     ("NQ=F",    "Nasdaq futures",     "US",    "ET",  2),
+    "YM":     ("YM=F",    "Dow futures",        "US",    "ET",  0),
+    "EURUSD": ("EURUSD=X","EUR/USD",            "FX",    "ET",  4),
+    "GBPUSD": ("GBPUSD=X","GBP/USD",            "FX",    "ET",  4),
+    "USDJPY": ("JPY=X",   "USD/JPY",            "FX",    "ET",  2),
+    "Gold":   ("GC=F",    "Gold",               "CMD",   "ET",  2),
+    "Brent":  ("BZ=F",    "Brent Oil",          "CMD",   "ET",  2),
+    "BTC":    ("BTC-USD", "Bitcoin",            "CRYPTO","ET",  0),
+}
+
+def get_session_data(ticker_sym, group, decimals):
     try:
-        req = urllib.request.Request(url)
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            data = json.loads(resp.read())
-        return data.get("results", [])
+        tk = yf.Ticker(ticker_sym)
+        # Pull 5 days of 1-minute data
+        df = tk.history(period="5d", interval="1m")
+        if df.empty:
+            return {}
+
+        df.index = df.index.tz_convert(ET)
+
+        now_et   = datetime.now(ET)
+        now_cet  = datetime.now(CET)
+
+        # Find last completed trading day
+        # For EU futures: RTH = 09:00-17:30 CET
+        # For US/FX/CMD:  RTH = 09:30-16:00 ET
+        if group == "EU":
+            tz      = CET
+            df_tz   = df.copy()
+            df_tz.index = df.index.tz_convert(CET)
+            rth_open  = dtime(9, 0)
+            rth_close = dtime(17, 30)
+        else:
+            tz      = ET
+            df_tz   = df.copy()
+            rth_open  = dtime(9, 30)
+            rth_close = dtime(16, 0)
+
+        # Get yesterday's date in the right tz
+        today_local = now_cet.date() if group == "EU" else now_et.date()
+        yest_local  = today_local - timedelta(days=1)
+        # Skip weekends
+        while yest_local.weekday() >= 5:
+            yest_local -= timedelta(days=1)
+
+        # RTH bars for yesterday
+        rth_bars = df_tz[
+            (df_tz.index.date == yest_local) &
+            (df_tz.index.time >= rth_open) &
+            (df_tz.index.time <= rth_close)
+        ]
+
+        # Overnight: from market close yesterday until 07:00 CET today
+        # Convert 07:00 CET to ET for comparison
+        seven_cet = CET.localize(datetime.combine(today_local, dtime(7, 0))).astimezone(ET)
+
+        if group == "EU":
+            on_start_cet = CET.localize(datetime.combine(yest_local, dtime(17, 30)))
+            on_start_et  = on_start_cet.astimezone(ET)
+        else:
+            on_start_et  = ET.localize(datetime.combine(yest_local, dtime(16, 0)))
+
+        on_bars = df[
+            (df.index >= on_start_et) &
+            (df.index <= seven_cet)
+        ]
+
+        # Current price
+        current_bars = df.tail(1)
+        current = float(current_bars["Close"].iloc[0]) if not current_bars.empty else None
+
+        result = {"current": current}
+
+        if not rth_bars.empty:
+            result["rth_open"]  = round(float(rth_bars["Open"].iloc[0]),  decimals)
+            result["rth_close"] = round(float(rth_bars["Close"].iloc[-1]), decimals)
+            result["rth_high"]  = round(float(rth_bars["High"].max()),     decimals)
+            result["rth_low"]   = round(float(rth_bars["Low"].min()),      decimals)
+            result["rth_range"] = round(result["rth_high"] - result["rth_low"], decimals)
+
+        if not on_bars.empty:
+            result["on_high"]  = round(float(on_bars["High"].max()),  decimals)
+            result["on_low"]   = round(float(on_bars["Low"].min()),   decimals)
+            result["on_range"] = round(result["on_high"] - result["on_low"], decimals)
+
+        return result
+
     except Exception as e:
-        print(f"Polygon error for {ticker}: {e}")
-        return []
+        print(f"Error fetching {ticker_sym}: {e}")
+        return {}
 
-def get_session_data(ticker, rth_open_et, rth_close_et, overnight_start_et, overnight_end_et, date_str_from, date_str_to):
-    bars = polygon_aggs(ticker, date_str_from, date_str_to)
-    if not bars:
-        return None
-
-    rth_bars = []
-    overnight_bars = []
-
-    for b in bars:
-        ts = datetime.fromtimestamp(b["t"] / 1000, tz=UTC).astimezone(ET)
-        t = ts.time()
-        if rth_open_et <= t <= rth_close_et:
-            rth_bars.append(b)
-        if overnight_start_et <= t or t <= overnight_end_et:
-            overnight_bars.append(b)
-
-    result = {"current": bars[-1]["c"] if bars else None}
-
-    if rth_bars:
-        result["rth_open"]  = rth_bars[0]["o"]
-        result["rth_close"] = rth_bars[-1]["c"]
-        result["rth_high"]  = max(b["h"] for b in rth_bars)
-        result["rth_low"]   = min(b["l"] for b in rth_bars)
-        result["rth_range"] = round(result["rth_high"] - result["rth_low"], 4)
-
-    if overnight_bars:
-        result["on_high"]  = max(b["h"] for b in overnight_bars)
-        result["on_low"]   = min(b["l"] for b in overnight_bars)
-        result["on_range"] = round(result["on_high"] - result["on_low"], 4)
-
-    return result
-
-def fetch_market_data():
-    now_cet = datetime.now(CET)
-    now_et  = datetime.now(ET)
-
-    today_str     = now_cet.strftime("%Y-%m-%d")
-    yesterday_str = (now_cet - timedelta(days=1)).strftime("%Y-%m-%d")
-    two_days_str  = (now_cet - timedelta(days=2)).strftime("%Y-%m-%d")
-
-    from time import strptime
-    from datetime import time as dtime
-
-    # RTH windows
-    eu_rth_open  = dtime(9, 0)
-    eu_rth_close = dtime(17, 30)
-    us_rth_open  = dtime(9, 30)
-    us_rth_close = dtime(16, 0)
-
-    # Overnight: market close → 07:00 CET (02:00 ET)
-    eu_on_start  = dtime(17, 30)
-    eu_on_end    = dtime(2, 0)   # ET equivalent of 07:00 CET (approx)
-    us_on_start  = dtime(16, 0)
-    us_on_end    = dtime(2, 0)
-
-    contracts = {
-        "FDAX":  {"ticker": "C:FDAX",    "rth": (eu_rth_open, eu_rth_close), "on": (eu_on_start, eu_on_end), "label": "FDAX", "name": "DAX futures",     "tz": "EU"},
-        "Bund":  {"ticker": "C:FGBL",    "rth": (eu_rth_open, eu_rth_close), "on": (eu_on_start, eu_on_end), "label": "Bund", "name": "Euro bond futures","tz": "EU"},
-        "FTSE":  {"ticker": "C:Z",       "rth": (eu_rth_open, eu_rth_close), "on": (eu_on_start, eu_on_end), "label": "FTSE Z","name": "FTSE 100 futures","tz": "EU"},
-        "ES":    {"ticker": "C:ES",      "rth": (us_rth_open, us_rth_close), "on": (us_on_start, us_on_end), "label": "ES",   "name": "S&P 500 futures", "tz": "US"},
-        "NQ":    {"ticker": "C:NQ",      "rth": (us_rth_open, us_rth_close), "on": (us_on_start, us_on_end), "label": "NQ",   "name": "Nasdaq futures",  "tz": "US"},
-        "YM":    {"ticker": "C:YM",      "rth": (us_rth_open, us_rth_close), "on": (us_on_start, us_on_end), "label": "YM",   "name": "Dow futures",     "tz": "US"},
-        "EURUSD":{"ticker": "C:EURUSD",  "rth": (us_rth_open, us_rth_close), "on": (us_on_start, us_on_end), "label": "EUR/USD","name": "FX",            "tz": "FX"},
-        "GBPUSD":{"ticker": "C:GBPUSD",  "rth": (us_rth_open, us_rth_close), "on": (us_on_start, us_on_end), "label": "GBP/USD","name": "FX",            "tz": "FX"},
-        "USDJPY":{"ticker": "C:USDJPY",  "rth": (us_rth_open, us_rth_close), "on": (us_on_start, us_on_end), "label": "USD/JPY","name": "FX",            "tz": "FX"},
-        "XAUUSD":{"ticker": "C:XAUUSD",  "rth": (us_rth_open, us_rth_close), "on": (us_on_start, us_on_end), "label": "Gold",  "name": "Commodity",      "tz": "FX"},
-        "BRENT": {"ticker": "X:BRENT",   "rth": (us_rth_open, us_rth_close), "on": (us_on_start, us_on_end), "label": "Brent", "name": "Commodity",      "tz": "FX"},
-        "BTCUSD":{"ticker": "X:BTCUSD",  "rth": (us_rth_open, us_rth_close), "on": (us_on_start, us_on_end), "label": "BTC/USD","name": "Crypto",        "tz": "FX"},
-    }
-
-    results = {}
-    for key, cfg in contracts.items():
-        data = get_session_data(
-            cfg["ticker"],
-            cfg["rth"][0], cfg["rth"][1],
-            cfg["on"][0],  cfg["on"][1],
-            two_days_str, today_str
-        )
-        results[key] = {**cfg, "data": data or {}}
-
-    return results
+def fetch_all_market_data():
+    data = {}
+    for key, (ticker, name, group, tz, decimals) in CONTRACTS.items():
+        print(f"  Fetching {key} ({ticker})...")
+        d = get_session_data(ticker, group, decimals)
+        data[key] = {"label": key, "name": name, "group": group, "decimals": decimals, "data": d}
+    return data
 
 def fmt(val, decimals=0):
     if val is None:
@@ -113,21 +125,25 @@ def fmt(val, decimals=0):
     return f"{val:,.{decimals}f}"
 
 def chg_pct(current, close):
-    if not current or not close:
-        return "", ""
+    if not current or not close or close == 0:
+        return "", "#888"
     pct = ((current - close) / close) * 100
     sign = "+" if pct >= 0 else ""
     color = "#3B6D11" if pct >= 0 else "#A32D2D"
     return f"{sign}{pct:.2f}%", color
 
-def contract_block_html(cfg, decimals=0):
-    d = cfg.get("data", {})
-    current = d.get("current")
+def contract_block_html(cfg):
+    d   = cfg.get("data", {})
+    dec = cfg.get("decimals", 2)
+    current   = d.get("current")
     rth_close = d.get("rth_close")
     pct, color = chg_pct(current, rth_close)
 
     def v(key):
-        return fmt(d.get(key), decimals)
+        return fmt(d.get(key), dec)
+
+    rth_range_str = f"{fmt(d.get('rth_range'), dec)} pts" if d.get("rth_range") is not None else "—"
+    on_range_str  = f"{fmt(d.get('on_range'),  dec)} pts" if d.get("on_range")  is not None else "—"
 
     return f"""
     <div style="border:0.5px solid #e0e0e0;border-radius:8px;overflow:hidden;margin-bottom:10px;">
@@ -138,20 +154,20 @@ def contract_block_html(cfg, decimals=0):
         </div>
         <div style="display:flex;align-items:center;gap:12px;">
           <span style="font-size:13px;font-weight:500;color:{color}">{pct}</span>
-          <span style="font-size:14px;font-weight:500;color:#111">{fmt(current, decimals)}</span>
+          <span style="font-size:14px;font-weight:500;color:#111">{fmt(current, dec)}</span>
         </div>
       </div>
       <div style="display:grid;grid-template-columns:1fr 1fr 1fr;padding:10px 14px;gap:8px 16px;background:#fff;">
         <div><div style="font-size:11px;color:#aaa;text-transform:uppercase;letter-spacing:0.04em">RTH open</div><div style="font-size:12px;font-weight:500;color:#111">{v('rth_open')}</div></div>
         <div><div style="font-size:11px;color:#aaa;text-transform:uppercase;letter-spacing:0.04em">RTH close</div><div style="font-size:12px;font-weight:500;color:#111">{v('rth_close')}</div></div>
-        <div><div style="font-size:11px;color:#aaa;text-transform:uppercase;letter-spacing:0.04em">RTH range</div><div style="font-size:12px;font-weight:500;color:#111">{v('rth_range', 0 if decimals==0 else decimals)} pts</div></div>
+        <div><div style="font-size:11px;color:#aaa;text-transform:uppercase;letter-spacing:0.04em">RTH range</div><div style="font-size:12px;font-weight:500;color:#111">{rth_range_str}</div></div>
         <div><div style="font-size:11px;color:#aaa;text-transform:uppercase;letter-spacing:0.04em">RTH high / low</div><div style="font-size:12px;font-weight:500;color:#111">{v('rth_high')}</div><div style="font-size:11px;color:#999">/ {v('rth_low')}</div></div>
         <div><div style="font-size:11px;color:#aaa;text-transform:uppercase;letter-spacing:0.04em">Overnight H / L</div><div style="font-size:12px;font-weight:500;color:#111">{v('on_high')}</div><div style="font-size:11px;color:#999">/ {v('on_low')}</div></div>
-        <div><div style="font-size:11px;color:#aaa;text-transform:uppercase;letter-spacing:0.04em">Overnight range</div><div style="font-size:12px;font-weight:500;color:#111">{v('on_range', 0 if decimals==0 else decimals)} pts</div></div>
+        <div><div style="font-size:11px;color:#aaa;text-transform:uppercase;letter-spacing:0.04em">Overnight range</div><div style="font-size:12px;font-weight:500;color:#111">{on_range_str}</div></div>
       </div>
     </div>"""
 
-def generate_brief(market_data):
+def generate_brief():
     cet = pytz.timezone("Europe/Amsterdam")
     today = datetime.now(cet)
     date_str = today.strftime("%A, %d %B %Y")
@@ -167,7 +183,7 @@ Return ONLY valid JSON, no markdown, no explanation. Schema:
   "overallRisk": "HIGH" or "MEDIUM" or "LOW",
   "riskFactors": [{{"label": "string max 3 words", "level": "HIGH or MEDIUM or LOW"}}],
   "yields": {{
-    "us10y": {{"yield": "X.XX%", "change": "+/-Xbp", "note": "brief note"}},
+    "us10y":   {{"yield": "X.XX%", "change": "+/-Xbp", "note": "brief note"}},
     "bund10y": {{"yield": "X.XX%", "change": "+/-Xbp", "note": "brief note"}}
   }},
   "events": [
@@ -225,13 +241,13 @@ def format_html(brief, market_data):
         for rf in brief.get("riskFactors", [])
     ])
 
-    eu_blocks = "".join([contract_block_html(market_data[k], decimals=0) for k in ["FDAX","Bund","FTSE"] if k in market_data])
-    us_blocks = "".join([contract_block_html(market_data[k], decimals=2) for k in ["ES","NQ","YM"] if k in market_data])
-    fx_blocks = "".join([contract_block_html(market_data[k], decimals=4) for k in ["EURUSD","GBPUSD","USDJPY"] if k in market_data])
-    cmdcrypto_blocks = "".join([contract_block_html(market_data[k], decimals=2) for k in ["XAUUSD","BRENT","BTCUSD"] if k in market_data])
+    eu_blocks     = "".join([contract_block_html(market_data[k]) for k in ["FDAX","Bund","FTSE"]     if k in market_data])
+    us_blocks     = "".join([contract_block_html(market_data[k]) for k in ["ES","NQ","YM"]           if k in market_data])
+    fx_blocks     = "".join([contract_block_html(market_data[k]) for k in ["EURUSD","GBPUSD","USDJPY"] if k in market_data])
+    other_blocks  = "".join([contract_block_html(market_data[k]) for k in ["Gold","Brent","BTC"]     if k in market_data])
 
-    yields = brief.get("yields", {})
-    us10y  = yields.get("us10y",  {})
+    yields  = brief.get("yields", {})
+    us10y   = yields.get("us10y", {})
     bund10y = yields.get("bund10y", {})
 
     events_html = ""
@@ -244,7 +260,7 @@ def format_html(brief, market_data):
             <div style="font-size:13px;font-weight:500;color:#111;margin-bottom:2px">{ev['title']}</div>
             <div style="font-size:12px;color:#666;line-height:1.5">{ev['description']}</div>
           </td>
-          <td style="padding:10px 6px;border-bottom:0.5px solid #f0f0f0;vertical-align:top;text-align:right">
+          <td style="padding:10px 6px;border-bottom:0.5px solid #f0f0f0;vertical-align:top;text-align:right;width:68px">
             <span style="font-size:11px;font-weight:500;padding:2px 8px;border-radius:4px;background:{risk_bg.get(imp,'#eee')};color:{badge_txt.get(imp,'#333')};border:0.5px solid {risk_colors.get(imp,'#ccc')}">{imp}</span>
           </td>
         </tr>"""
@@ -254,7 +270,7 @@ def format_html(brief, market_data):
         imp = w.get("impact","MEDIUM")
         week_html += f"""
         <tr>
-          <td style="padding:9px 6px;border-bottom:0.5px solid #f0f0f0;vertical-align:top;white-space:nowrap">
+          <td style="padding:9px 6px;border-bottom:0.5px solid #f0f0f0;vertical-align:top;white-space:nowrap;width:85px">
             <div style="font-size:13px;font-weight:500;color:#111">{w.get('day','')}</div>
             <div style="font-size:11px;color:#aaa">{w.get('date','')}</div>
           </td>
@@ -262,7 +278,7 @@ def format_html(brief, market_data):
             <div style="font-size:13px;font-weight:500;color:#111;margin-bottom:2px">{w.get('event','')}</div>
             <div style="font-size:12px;color:#777">{w.get('note','')}</div>
           </td>
-          <td style="padding:9px 6px;border-bottom:0.5px solid #f0f0f0;vertical-align:top;text-align:right">
+          <td style="padding:9px 6px;border-bottom:0.5px solid #f0f0f0;vertical-align:top;text-align:right;width:68px">
             <span style="font-size:11px;font-weight:500;padding:2px 8px;border-radius:4px;background:{risk_bg.get(imp,'#eee')};color:{badge_txt.get(imp,'#333')};border:0.5px solid {risk_colors.get(imp,'#ccc')}">{imp}</span>
           </td>
         </tr>"""
@@ -297,9 +313,24 @@ def format_html(brief, market_data):
   <div style="padding:14px 24px;border-bottom:1px solid #f0f0f0">
     <div style="font-size:11px;font-weight:500;letter-spacing:0.07em;text-transform:uppercase;color:#aaa;margin-bottom:10px">Fixed income yields</div>
     <table style="width:100%;border-collapse:collapse">
-      <tr><th style="font-size:11px;font-weight:500;color:#aaa;text-transform:uppercase;letter-spacing:0.05em;padding:4px 6px;text-align:left;width:160px">Instrument</th><th style="font-size:11px;font-weight:500;color:#aaa;text-transform:uppercase;letter-spacing:0.05em;padding:4px 6px;text-align:right;width:70px">Yield</th><th style="font-size:11px;font-weight:500;color:#aaa;text-transform:uppercase;letter-spacing:0.05em;padding:4px 6px;text-align:right;width:70px">Chg</th><th style="font-size:11px;font-weight:500;color:#aaa;text-transform:uppercase;letter-spacing:0.05em;padding:4px 6px;text-align:left">Note</th></tr>
-      <tr><td style="padding:8px 6px;border-bottom:0.5px solid #f0f0f0;font-weight:500;font-size:13px;color:#111">US 10Y Treasury</td><td style="padding:8px 6px;border-bottom:0.5px solid #f0f0f0;font-size:13px;text-align:right;color:#111">{us10y.get('yield','—')}</td><td style="padding:8px 6px;border-bottom:0.5px solid #f0f0f0;font-size:13px;text-align:right;color:#A32D2D">{us10y.get('change','—')}</td><td style="padding:8px 6px;border-bottom:0.5px solid #f0f0f0;font-size:12px;color:#888">{us10y.get('note','')}</td></tr>
-      <tr><td style="padding:8px 6px;font-weight:500;font-size:13px;color:#111">German 10Y Bund</td><td style="padding:8px 6px;font-size:13px;text-align:right;color:#111">{bund10y.get('yield','—')}</td><td style="padding:8px 6px;font-size:13px;text-align:right;color:#A32D2D">{bund10y.get('change','—')}</td><td style="padding:8px 6px;font-size:12px;color:#888">{bund10y.get('note','')}</td></tr>
+      <tr>
+        <th style="font-size:11px;font-weight:500;color:#aaa;text-transform:uppercase;padding:4px 6px;text-align:left;width:160px">Instrument</th>
+        <th style="font-size:11px;font-weight:500;color:#aaa;text-transform:uppercase;padding:4px 6px;text-align:right;width:70px">Yield</th>
+        <th style="font-size:11px;font-weight:500;color:#aaa;text-transform:uppercase;padding:4px 6px;text-align:right;width:70px">Chg</th>
+        <th style="font-size:11px;font-weight:500;color:#aaa;text-transform:uppercase;padding:4px 6px;text-align:left">Note</th>
+      </tr>
+      <tr>
+        <td style="padding:8px 6px;border-bottom:0.5px solid #f0f0f0;font-weight:500;font-size:13px;color:#111">US 10Y Treasury</td>
+        <td style="padding:8px 6px;border-bottom:0.5px solid #f0f0f0;font-size:13px;text-align:right;color:#111">{us10y.get('yield','—')}</td>
+        <td style="padding:8px 6px;border-bottom:0.5px solid #f0f0f0;font-size:13px;text-align:right;color:#A32D2D">{us10y.get('change','—')}</td>
+        <td style="padding:8px 6px;border-bottom:0.5px solid #f0f0f0;font-size:12px;color:#888">{us10y.get('note','')}</td>
+      </tr>
+      <tr>
+        <td style="padding:8px 6px;font-weight:500;font-size:13px;color:#111">German 10Y Bund</td>
+        <td style="padding:8px 6px;font-size:13px;text-align:right;color:#111">{bund10y.get('yield','—')}</td>
+        <td style="padding:8px 6px;font-size:13px;text-align:right;color:#A32D2D">{bund10y.get('change','—')}</td>
+        <td style="padding:8px 6px;font-size:12px;color:#888">{bund10y.get('note','')}</td>
+      </tr>
     </table>
   </div>
 
@@ -310,7 +341,7 @@ def format_html(brief, market_data):
 
   <div style="padding:14px 24px;border-bottom:1px solid #f0f0f0">
     <div style="font-size:11px;font-weight:500;letter-spacing:0.07em;text-transform:uppercase;color:#aaa;margin-bottom:12px">Commodities &amp; Crypto</div>
-    {cmdcrypto_blocks}
+    {other_blocks}
   </div>
 
   <div style="padding:14px 24px;border-bottom:1px solid #f0f0f0">
@@ -343,10 +374,10 @@ def send_email(html, date_str):
     print(f"Email sent: {resp.status_code}")
 
 if __name__ == "__main__":
-    print("Fetching market data from Polygon...")
-    market_data = fetch_market_data()
+    print("Fetching market data from Yahoo Finance...")
+    market_data = fetch_all_market_data()
     print("Generating brief from Perplexity...")
-    brief = generate_brief(market_data)
+    brief = generate_brief()
     print(f"Risk: {brief.get('overallRisk')} | Events: {len(brief.get('events', []))}")
     html = format_html(brief, market_data)
     send_email(html, brief["date_str"])
