@@ -1,6 +1,5 @@
 import os
 import json
-import time
 import urllib.request
 import urllib.error
 import sendgrid
@@ -20,7 +19,7 @@ Based on your knowledge of the economic calendar and typical market patterns for
 
 Return ONLY valid JSON, no markdown, no explanation. Schema:
 {{
-  "summary": "2-3 sentence overall risk tone for today's EU session. Be direct, trader-focused.",
+  "summary": "2-3 sentence overall risk tone for today EU session. Be direct, trader-focused.",
   "overallRisk": "HIGH" or "MEDIUM" or "LOW",
   "riskFactors": [{{"label": "string max 3 words", "level": "HIGH or MEDIUM or LOW"}}],
   "events": [
@@ -42,28 +41,24 @@ Return ONLY valid JSON, no markdown, no explanation. Schema:
 
 Focus ONLY on events with real potential to move EU indexes today. Include: ECB/Fed speakers, CPI/PPI/PMI/GDP/NFP releases, major earnings if market-moving, geopolitical or macro tail risks. Omit noise. Events list: 3-7 items max."""
 
-    api_key = os.environ["GEMINI_API_KEY"]
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={api_key}"
+    api_key = os.environ["GROQ_API_KEY"]
+    url = "https://api.groq.com/openai/v1/chat/completions"
 
     payload = json.dumps({
-        "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {"temperature": 0.3}
+        "model": "llama-3.3-70b-versatile",
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.3
     }).encode("utf-8")
 
-    req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
-    for attempt in range(3):
-        try:
-            with urllib.request.urlopen(req) as resp:
-                data = json.loads(resp.read())
-            break
-        except urllib.error.HTTPError as e:
-            if e.code == 429 and attempt < 2:
-                print(f"Rate limited, waiting 30 seconds... (attempt {attempt + 1})")
-                time.sleep(30)
-            else:
-                raise
+    req = urllib.request.Request(url, data=payload, headers={
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {api_key}"
+    })
 
-    text = data["candidates"][0]["content"]["parts"][0]["text"]
+    with urllib.request.urlopen(req) as resp:
+        data = json.loads(resp.read())
+
+    text = data["choices"][0]["message"]["content"]
     clean = text.replace("```json", "").replace("```", "").strip()
     brief = json.loads(clean)
     brief["date_str"] = date_str
