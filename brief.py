@@ -16,7 +16,7 @@ def generate_brief():
 
     prompt = f"""You are a concise pre-market intelligence analyst for an intraday EU index trader (trades DAX, CAC40, AEX, FTSE, ES/NQ). It is {date_iso} and EU markets open in ~2 hours.
 
-Search the web for today's economic calendar, ECB/Fed announcements, macro data releases, and any overnight market-moving news.
+Based on your knowledge of the economic calendar and typical market patterns for this date, provide a morning brief.
 
 Return ONLY valid JSON, no markdown, no explanation. Schema:
 {{
@@ -47,11 +47,9 @@ Focus ONLY on events with real potential to move EU indexes today. Include: ECB/
 
     payload = json.dumps({
         "contents": [{"parts": [{"text": prompt}]}],
-        "tools": [{"google_search": {}}],
         "generationConfig": {"temperature": 0.3}
     }).encode("utf-8")
 
-    import time
     req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
     for attempt in range(3):
         try:
