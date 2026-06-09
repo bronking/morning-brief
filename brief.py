@@ -54,7 +54,8 @@ Focus ONLY on events with real potential to move EU indexes today. Include: ECB/
         "Content-Type": "application/json",
         "Authorization": f"Bearer {api_key}"
     })
-
+    print(f"Using GROQ key starting with: {api_key[:8]}...")
+    print(f"Key length: {len(api_key)}")
     with urllib.request.urlopen(req) as resp:
         data = json.loads(resp.read())
 
