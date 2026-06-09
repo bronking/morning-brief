@@ -21,6 +21,7 @@ jobs:
 
       - name: Generate and send brief
         env:
+          POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY }}
           PERPLEXITY_API_KEY: ${{ secrets.PERPLEXITY_API_KEY }}
           SENDGRID_API_KEY: ${{ secrets.SENDGRID_API_KEY }}
           SENDER_EMAIL: ${{ secrets.SENDER_EMAIL }}
