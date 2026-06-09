@@ -15,7 +15,7 @@ def generate_brief():
 
     prompt = f"""You are a concise pre-market intelligence analyst for an intraday EU index trader (trades DAX, CAC40, AEX, FTSE, ES/NQ). It is {date_iso} and EU markets open in ~2 hours.
 
-Based on your knowledge of the economic calendar and typical market patterns for this date, provide a morning brief.
+Search the web for today's economic calendar, ECB/Fed announcements, macro data releases, and any overnight market-moving news relevant to EU indexes.
 
 Return ONLY valid JSON, no markdown, no explanation. Schema:
 {{
@@ -41,24 +41,26 @@ Return ONLY valid JSON, no markdown, no explanation. Schema:
 
 Focus ONLY on events with real potential to move EU indexes today. Include: ECB/Fed speakers, CPI/PPI/PMI/GDP/NFP releases, major earnings if market-moving, geopolitical or macro tail risks. Omit noise. Events list: 3-7 items max."""
 
-    token = os.environ["GITHUB_TOKEN"]
-    url = "https://models.inference.ai.azure.com/chat/completions"
+    api_key = os.environ["ANTHROPIC_API_KEY"]
+    url = "https://api.anthropic.com/v1/messages"
 
     payload = json.dumps({
-        "model": "gpt-4o-mini",
-        "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.3
+        "model": "claude-haiku-4-5",
+        "max_tokens": 1024,
+        "tools": [{"type": "web_search_20250305", "name": "web_search"}],
+        "messages": [{"role": "user", "content": prompt}]
     }).encode("utf-8")
 
     req = urllib.request.Request(url, data=payload, headers={
         "Content-Type": "application/json",
-        "Authorization": f"Bearer {token}"
+        "x-api-key": api_key,
+        "anthropic-version": "2023-06-01"
     })
 
     with urllib.request.urlopen(req) as resp:
         data = json.loads(resp.read())
 
-    text = data["choices"][0]["message"]["content"]
+    text = "".join(b.get("text", "") for b in data["content"] if b["type"] == "text")
     clean = text.replace("```json", "").replace("```", "").strip()
     brief = json.loads(clean)
     brief["date_str"] = date_str
