@@ -1,0 +1,27 @@
+name: Morning Brief
+
+on:
+  schedule:
+    - cron: '0 6 * * 1-5'   # 07:00 CET (winter) — change to '0 5 * * 1-5' in summer (CEST)
+  workflow_dispatch:         # lets you trigger manually from GitHub to test
+
+jobs:
+  send-brief:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install sendgrid pytz
+
+      - name: Generate and send brief
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          SENDGRID_API_KEY: ${{ secrets.SENDGRID_API_KEY }}
+          SENDER_EMAIL: ${{ secrets.SENDER_EMAIL }}
+        run: python brief.py
