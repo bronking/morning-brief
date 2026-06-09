@@ -45,7 +45,7 @@ Focus ONLY on events with real potential to move EU indexes today. Include: ECB/
     url = "https://api.anthropic.com/v1/messages"
 
     payload = json.dumps({
-        "model": "claude-haiku-4-5",
+        "model": "claude-haiku-4-5-20251001",
         "max_tokens": 1024,
         "tools": [{"type": "web_search_20250305", "name": "web_search"}],
         "messages": [{"role": "user", "content": prompt}]
