@@ -20,8 +20,10 @@ jobs:
         run: pip install sendgrid pytz
 
       - name: Generate and send brief
-        env:
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      
+      env:
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           SENDGRID_API_KEY: ${{ secrets.SENDGRID_API_KEY }}
           SENDER_EMAIL: ${{ secrets.SENDER_EMAIL }}
+          
         run: python brief.py
