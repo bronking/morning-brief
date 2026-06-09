@@ -2,8 +2,8 @@ name: Morning Brief
 
 on:
   schedule:
-    - cron: '0 6 * * 1-5'   # 07:00 CET (winter) — change to '0 5 * * 1-5' in summer (CEST)
-  workflow_dispatch:         # lets you trigger manually from GitHub to test
+    - cron: '0 6 * * 1-5'
+  workflow_dispatch:
 
 jobs:
   send-brief:
@@ -21,7 +21,7 @@ jobs:
 
       - name: Generate and send brief
         env:
-          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           SENDGRID_API_KEY: ${{ secrets.SENDGRID_API_KEY }}
           SENDER_EMAIL: ${{ secrets.SENDER_EMAIL }}
         run: python brief.py
