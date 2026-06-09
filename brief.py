@@ -41,21 +41,22 @@ Return ONLY valid JSON, no markdown, no explanation. Schema:
 
 Focus ONLY on events with real potential to move EU indexes today. Include: ECB/Fed speakers, CPI/PPI/PMI/GDP/NFP releases, major earnings if market-moving, geopolitical or macro tail risks. Omit noise. Events list: 3-7 items max."""
 
-    api_key = os.environ["GROQ_API_KEY"]
-    url = "https://api.groq.com/openai/v1/chat/completions"
+    api_key = os.environ["OPENROUTER_API_KEY"]
+    url = "https://openrouter.ai/api/v1/chat/completions"
 
     payload = json.dumps({
-        "model": "llama-3.3-70b-versatile",
+        "model": "meta-llama/llama-3.3-70b-instruct:free",
         "messages": [{"role": "user", "content": prompt}],
         "temperature": 0.3
     }).encode("utf-8")
 
     req = urllib.request.Request(url, data=payload, headers={
         "Content-Type": "application/json",
-        "Authorization": f"Bearer {api_key}"
+        "Authorization": f"Bearer {api_key}",
+        "HTTP-Referer": "https://github.com",
+        "X-Title": "Morning Brief"
     })
-    print(f"Using GROQ key starting with: {api_key[:8]}...")
-    print(f"Key length: {len(api_key)}")
+
     with urllib.request.urlopen(req) as resp:
         data = json.loads(resp.read())
 
