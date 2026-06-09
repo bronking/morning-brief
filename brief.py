@@ -1,6 +1,8 @@
 import os
 import json
+import time
 import urllib.request
+import urllib.error
 import sendgrid
 from sendgrid.helpers.mail import Mail
 from datetime import datetime
@@ -49,9 +51,19 @@ Focus ONLY on events with real potential to move EU indexes today. Include: ECB/
         "generationConfig": {"temperature": 0.3}
     }).encode("utf-8")
 
+    import time
     req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
-    with urllib.request.urlopen(req) as resp:
-        data = json.loads(resp.read())
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(req) as resp:
+                data = json.loads(resp.read())
+            break
+        except urllib.error.HTTPError as e:
+            if e.code == 429 and attempt < 2:
+                print(f"Rate limited, waiting 30 seconds... (attempt {attempt + 1})")
+                time.sleep(30)
+            else:
+                raise
 
     text = data["candidates"][0]["content"]["parts"][0]["text"]
     clean = text.replace("```json", "").replace("```", "").strip()
